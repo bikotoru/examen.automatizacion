@@ -1,0 +1,240 @@
+name: Build and Deploy to Cloud Run
+
+on:
+  push:
+    branches: [dev, qa, main]
+  pull_request:
+    branches: [dev, qa, main]
+  workflow_dispatch:
+env:
+  PROJECT_ID: newdte
+  GAR_LOCATION: us-east1
+  REPOSITORY: sitio-repo
+  SERVICE: prueba-${{ github.ref_name }}
+  REGION: us-east1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Cache Maven dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+
+    - name: Build with Maven
+      run: |
+        cd sitio
+        mvn clean package -DskipTests
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sitio-jar
+        path: sitio/target/*.jar
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name)
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: sitio-jar
+        path: sitio/target/
+
+    - name: Google Auth
+      id: auth
+      uses: google-github-actions/auth@v3
+      with:
+        credentials_json: '${{ secrets.GCP }}'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v3
+
+    - name: Configure Docker
+      run: gcloud auth configure-docker $GAR_LOCATION-docker.pkg.dev
+
+    - name: Create repository if not exists
+      run: |
+        gcloud artifacts repositories describe $REPOSITORY --location=$GAR_LOCATION || \
+        gcloud artifacts repositories create $REPOSITORY --location=$GAR_LOCATION --repository-format=docker
+
+    - name: Build and Push Container
+      run: |
+        cd sitio
+        docker build -t $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA .
+        docker push $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA
+
+    - name: Obtener imagen actual antes del deploy
+      id: get-current-image
+      run: |
+        echo "🔍 Verificando si el servicio $SERVICE existe..."
+        if gcloud run services describe $SERVICE --platform managed --region $REGION > /dev/null 2>&1; then
+          CURRENT_IMAGE=$(gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(spec.template.spec.containers[0].image)')
+          echo "✅ Servicio existe. Imagen actual: $CURRENT_IMAGE"
+        else
+          CURRENT_IMAGE=""
+          echo "ℹ️ Servicio no existe (primer deploy). No hay imagen para rollback."
+        fi
+        echo "CURRENT_IMAGE=$CURRENT_IMAGE" >> $GITHUB_OUTPUT
+
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy $SERVICE \
+          --image $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA \
+          --quiet \
+          --platform managed \
+          --region $REGION \
+          --allow-unauthenticated \
+          --port 8080
+
+    - name: Get Service URL
+      id: get-url
+      run: |
+        SERVICE_URL=$(gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(status.url)')
+        echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_OUTPUT
+        echo "Deployed to: $SERVICE_URL"
+
+    outputs:
+      service_url: ${{ steps.get-url.outputs.SERVICE_URL }}
+      current_image: ${{ steps.get-current-image.outputs.CURRENT_IMAGE }}
+
+  test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name)
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Set target URL
+      id: set-url
+      run: |
+        if [ "${{ github.ref_name }}" = "dev" ]; then
+          echo "TARGET_URL=https://prueba-dev-347263138245.us-east1.run.app" >> $GITHUB_OUTPUT
+        elif [ "${{ github.ref_name }}" = "qa" ]; then
+          echo "TARGET_URL=https://prueba-qa-xxxxxxxx.run.app" >> $GITHUB_OUTPUT
+        elif [ "${{ github.ref_name }}" = "main" ]; then
+          echo "TARGET_URL=https://prueba-main-xxxxxxx.run.app" >> $GITHUB_OUTPUT
+        else
+          echo "TARGET_URL=${{ needs.deploy.outputs.service_url }}" >> $GITHUB_OUTPUT
+        fi
+        echo "Testing URL: ${{ steps.set-url.outputs.TARGET_URL }}"
+
+    - name: Esperar que el servicio esté listo
+      run: |
+        echo "Esperando que el servicio esté listo..."
+        sleep 30
+        for i in {1..10}; do
+          if curl -f -s "${{ steps.set-url.outputs.TARGET_URL }}" > /dev/null; then
+            echo "¡Servicio listo!"
+            break
+          fi
+          echo "Intento $i: Servicio no listo, esperando 15 segundos..."
+          sleep 15
+        done
+
+    - name: Build Selenium Tests Docker Image
+      run: |
+        cd pruebas-selenium
+        docker build -t selenium-tests .
+
+    - name: Run Selenium Tests with Docker
+      id: selenium-tests
+      run: |
+        mkdir -p screenshots
+        if docker run --rm \
+          -e SITIO_URL="${{ steps.set-url.outputs.TARGET_URL }}" \
+          -v $(pwd)/screenshots:/app/screenshots \
+          selenium-tests; then
+          echo "TEST_RESULT=success" >> $GITHUB_OUTPUT
+          echo "✅ Todas las pruebas pasaron"
+        else
+          echo "TEST_RESULT=failure" >> $GITHUB_OUTPUT
+          echo "❌ Las pruebas fallaron"
+        fi
+      continue-on-error: true
+
+    - name: Verificar resultado de pruebas
+      run: |
+        if [ "${{ steps.selenium-tests.outputs.TEST_RESULT }}" = "failure" ]; then
+          echo "❌ Las pruebas Selenium fallaron - Pipeline continuará para rollback"
+          exit 1
+        else
+          echo "✅ Todas las pruebas pasaron correctamente"
+        fi
+
+    - name: Fix screenshots permissions
+      if: always()
+      run: |
+        sudo chown -R runner:docker screenshots/ || true
+        sudo chmod -R 755 screenshots/ || true
+
+    - name: Upload Screenshots
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: selenium-screenshots-${{ github.ref_name }}
+        path: screenshots/
+        retention-days: 30
+
+    outputs:
+      tests_passed: ${{ steps.selenium-tests.outputs.TEST_RESULT == 'success' }}
+
+  rollback:
+    needs: [deploy, test]
+    runs-on: ubuntu-latest
+    if: always() && needs.test.result == 'failure' && needs.deploy.outputs.current_image != ''
+    
+    steps:
+    - name: Debug condiciones rollback
+      run: |
+        echo "🔍 DEBUG ROLLBACK CONDITIONS:"
+        echo "needs.test.result: ${{ needs.test.result }}"
+        echo "needs.deploy.outputs.current_image: ${{ needs.deploy.outputs.current_image }}"
+        echo "github.event_name: ${{ github.event_name }}"
+        echo "github.ref_name: ${{ github.ref_name }}"
+
+    - name: Google Auth
+      uses: google-github-actions/auth@v3
+      with:
+        credentials_json: '${{ secrets.GCP }}'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v3
+
+    - name: Rollback a imagen anterior
+      run: |
+        echo "🔄 Realizando rollback debido a fallo en pruebas..."
+        echo "Imagen anterior: ${{ needs.deploy.outputs.current_image }}"
+        gcloud run deploy ${{ env.SERVICE }} \
+          --image ${{ needs.deploy.outputs.current_image }} \
+          --quiet \
+          --platform managed \
+          --region ${{ env.REGION }}
+        echo "✅ Rollback completado"
+
+    - name: Notificar rollback
+      run: |
+        echo "⚠️ ROLLBACK AUTOMÁTICO EJECUTADO"
+        echo "Razón: Las pruebas de Selenium fallaron"
+        echo "Servicio: ${{ env.SERVICE }}"
+        echo "Imagen restaurada: ${{ needs.deploy.outputs.current_image }}"
