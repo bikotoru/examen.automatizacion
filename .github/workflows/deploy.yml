@@ -187,7 +187,7 @@ jobs:
   rollback:
     needs: [deploy, test]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name) && needs.test.outputs.tests_passed == 'false' && needs.deploy.outputs.current_image != ''
+    if: always() && github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name) && needs.test.result == 'failure' && needs.deploy.outputs.current_image != ''
     
     steps:
     - name: Google Auth
