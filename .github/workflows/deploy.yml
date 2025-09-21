@@ -85,9 +85,15 @@ jobs:
     - name: Obtener imagen actual antes del deploy
       id: get-current-image
       run: |
-        CURRENT_IMAGE=$(gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(spec.template.spec.template.spec.containers[0].image)' 2>/dev/null || echo "")
+        echo "🔍 Verificando si el servicio $SERVICE existe..."
+        if gcloud run services describe $SERVICE --platform managed --region $REGION > /dev/null 2>&1; then
+          CURRENT_IMAGE=$(gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(spec.template.spec.containers[0].image)')
+          echo "✅ Servicio existe. Imagen actual: $CURRENT_IMAGE"
+        else
+          CURRENT_IMAGE=""
+          echo "ℹ️ Servicio no existe (primer deploy). No hay imagen para rollback."
+        fi
         echo "CURRENT_IMAGE=$CURRENT_IMAGE" >> $GITHUB_OUTPUT
-        echo "Imagen actual: $CURRENT_IMAGE"
 
     - name: Deploy to Cloud Run
       run: |
