@@ -159,6 +159,12 @@ jobs:
           exit 1
         fi
 
+    - name: Fix screenshots permissions
+      if: always()
+      run: |
+        sudo chown -R runner:docker screenshots/ || true
+        sudo chmod -R 755 screenshots/ || true
+
     - name: Upload Screenshots
       uses: actions/upload-artifact@v4
       if: always()
