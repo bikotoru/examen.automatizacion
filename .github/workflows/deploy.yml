@@ -196,9 +196,17 @@ jobs:
   rollback:
     needs: [deploy, test]
     runs-on: ubuntu-latest
-    if: always() && github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name) && needs.test.result == 'failure' && needs.deploy.outputs.current_image != ''
+    if: always() && needs.test.result == 'failure' && needs.deploy.outputs.current_image != ''
     
     steps:
+    - name: Debug condiciones rollback
+      run: |
+        echo "🔍 DEBUG ROLLBACK CONDITIONS:"
+        echo "needs.test.result: ${{ needs.test.result }}"
+        echo "needs.deploy.outputs.current_image: ${{ needs.deploy.outputs.current_image }}"
+        echo "github.event_name: ${{ github.event_name }}"
+        echo "github.ref_name: ${{ github.ref_name }}"
+
     - name: Google Auth
       uses: google-github-actions/auth@v3
       with:
@@ -209,18 +217,18 @@ jobs:
 
     - name: Rollback a imagen anterior
       run: |
-        echo "Realizando rollback debido a fallo en pruebas..."
+        echo "🔄 Realizando rollback debido a fallo en pruebas..."
         echo "Imagen anterior: ${{ needs.deploy.outputs.current_image }}"
         gcloud run deploy ${{ env.SERVICE }} \
           --image ${{ needs.deploy.outputs.current_image }} \
           --quiet \
           --platform managed \
           --region ${{ env.REGION }}
-        echo "Rollback completado"
+        echo "✅ Rollback completado"
 
     - name: Notificar rollback
       run: |
-        echo "ROLLBACK AUTOMÁTICO EJECUTADO"
+        echo "⚠️ ROLLBACK AUTOMÁTICO EJECUTADO"
         echo "Razón: Las pruebas de Selenium fallaron"
         echo "Servicio: ${{ env.SERVICE }}"
         echo "Imagen restaurada: ${{ needs.deploy.outputs.current_image }}"
