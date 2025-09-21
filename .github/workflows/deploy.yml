@@ -111,19 +111,6 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v5
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v5
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-
-    - name: Cache Maven dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.m2
-        key: ${{ runner.os }}-m2-selenium-${{ hashFiles('**/pom.xml') }}
-        restore-keys: ${{ runner.os }}-m2-selenium
-
     - name: Set target URL
       id: set-url
       run: |
@@ -151,25 +138,34 @@ jobs:
           sleep 15
         done
 
-    - name: Run Selenium Tests
+    - name: Build Selenium Tests Docker Image
       run: |
         cd pruebas-selenium
-        export SITIO_URL="${{ steps.set-url.outputs.TARGET_URL }}"
-        mvn test
-      continue-on-error: true
+        docker build -t selenium-tests .
+
+    - name: Run Selenium Tests with Docker
+      id: selenium-tests
+      run: |
+        mkdir -p screenshots
+        if docker run --rm \
+          -e SITIO_URL="${{ steps.set-url.outputs.TARGET_URL }}" \
+          -v $(pwd)/screenshots:/app/screenshots \
+          selenium-tests; then
+          echo "TEST_RESULT=success" >> $GITHUB_OUTPUT
+          echo "Todas las pruebas pasaron"
+        else
+          echo "TEST_RESULT=failure" >> $GITHUB_OUTPUT
+          echo "Las pruebas fallaron"
+          exit 1
+        fi
 
     - name: Upload Screenshots
       uses: actions/upload-artifact@v4
       if: always()
       with:
         name: selenium-screenshots-${{ github.ref_name }}
-        path: pruebas-selenium/screenshots/
+        path: screenshots/
         retention-days: 30
 
-    - name: Upload Test Results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: test-results-${{ github.ref_name }}
-        path: pruebas-selenium/target/surefire-reports/
-        retention-days: 30
+    outputs:
+      tests_passed: ${{ steps.selenium-tests.outputs.TEST_RESULT == 'success' }}
