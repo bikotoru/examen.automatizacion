@@ -92,6 +92,84 @@ jobs:
           --allow-unauthenticated \
           --port 8080
 
-    - name: Show Service URL
+    - name: Get Service URL
+      id: get-url
       run: |
-        gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(status.url)'
+        SERVICE_URL=$(gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(status.url)')
+        echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_OUTPUT
+        echo "Deployed to: $SERVICE_URL"
+
+    outputs:
+      service_url: ${{ steps.get-url.outputs.SERVICE_URL }}
+
+  test:
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name)
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Cache Maven dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-selenium-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2-selenium
+
+    - name: Set target URL
+      id: set-url
+      run: |
+        if [ "${{ github.ref_name }}" = "dev" ]; then
+          echo "TARGET_URL=https://prueba-dev-347263138245.us-east1.run.app" >> $GITHUB_OUTPUT
+        elif [ "${{ github.ref_name }}" = "qa" ]; then
+          echo "TARGET_URL=https://prueba-qa-xxxxxxxx.run.app" >> $GITHUB_OUTPUT
+        elif [ "${{ github.ref_name }}" = "main" ]; then
+          echo "TARGET_URL=https://prueba-main-xxxxxxx.run.app" >> $GITHUB_OUTPUT
+        else
+          echo "TARGET_URL=${{ needs.deploy.outputs.service_url }}" >> $GITHUB_OUTPUT
+        fi
+        echo "Testing URL: ${{ steps.set-url.outputs.TARGET_URL }}"
+
+    - name: Esperar que el servicio esté listo
+      run: |
+        echo "Esperando que el servicio esté listo..."
+        sleep 30
+        for i in {1..10}; do
+          if curl -f -s "${{ steps.set-url.outputs.TARGET_URL }}" > /dev/null; then
+            echo "¡Servicio listo!"
+            break
+          fi
+          echo "Intento $i: Servicio no listo, esperando 15 segundos..."
+          sleep 15
+        done
+
+    - name: Run Selenium Tests
+      run: |
+        cd pruebas-selenium
+        export SITIO_URL="${{ steps.set-url.outputs.TARGET_URL }}"
+        mvn test
+      continue-on-error: true
+
+    - name: Upload Screenshots
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: selenium-screenshots-${{ github.ref_name }}
+        path: pruebas-selenium/screenshots/
+        retention-days: 30
+
+    - name: Upload Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ github.ref_name }}
+        path: pruebas-selenium/target/surefire-reports/
+        retention-days: 30
