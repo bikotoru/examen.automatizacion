@@ -1,0 +1,97 @@
+name: Build and Deploy to Cloud Run
+
+on:
+  push:
+    branches: [dev, qa, main]
+  pull_request:
+    branches: [dev, qa, main]
+  workflow_dispatch:
+env:
+  PROJECT_ID: newdte
+  GAR_LOCATION: us-east1
+  REPOSITORY: sitio-repo
+  SERVICE: prueba-${{ github.ref_name }}
+  REGION: us-east1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Cache Maven dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+
+    - name: Build with Maven
+      run: |
+        cd sitio
+        mvn clean package -DskipTests
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sitio-jar
+        path: sitio/target/*.jar
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && contains(fromJson('["dev", "qa", "main"]'), github.ref_name)
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: sitio-jar
+        path: sitio/target/
+
+    - name: Google Auth
+      id: auth
+      uses: google-github-actions/auth@v3
+      with:
+        credentials_json: '${{ secrets.GCP }}'
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v3
+
+    - name: Configure Docker
+      run: gcloud auth configure-docker $GAR_LOCATION-docker.pkg.dev
+
+    - name: Create repository if not exists
+      run: |
+        gcloud artifacts repositories describe $REPOSITORY --location=$GAR_LOCATION || \
+        gcloud artifacts repositories create $REPOSITORY --location=$GAR_LOCATION --repository-format=docker
+
+    - name: Build and Push Container
+      run: |
+        cd sitio
+        docker build -t $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA .
+        docker push $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA
+
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy $SERVICE \
+          --image $GAR_LOCATION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$GITHUB_SHA \
+          --quiet \
+          --platform managed \
+          --region $REGION \
+          --allow-unauthenticated \
+          --port 8080
+
+    - name: Show Service URL
+      run: |
+        gcloud run services describe $SERVICE --platform managed --region $REGION --format 'value(status.url)'
