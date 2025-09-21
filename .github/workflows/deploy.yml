@@ -160,11 +160,20 @@ jobs:
           -v $(pwd)/screenshots:/app/screenshots \
           selenium-tests; then
           echo "TEST_RESULT=success" >> $GITHUB_OUTPUT
-          echo "Todas las pruebas pasaron"
+          echo "✅ Todas las pruebas pasaron"
         else
           echo "TEST_RESULT=failure" >> $GITHUB_OUTPUT
-          echo "Las pruebas fallaron"
+          echo "❌ Las pruebas fallaron"
+        fi
+      continue-on-error: true
+
+    - name: Verificar resultado de pruebas
+      run: |
+        if [ "${{ steps.selenium-tests.outputs.TEST_RESULT }}" = "failure" ]; then
+          echo "❌ Las pruebas Selenium fallaron - Pipeline continuará para rollback"
           exit 1
+        else
+          echo "✅ Todas las pruebas pasaron correctamente"
         fi
 
     - name: Fix screenshots permissions
